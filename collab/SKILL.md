@@ -1,6 +1,6 @@
 # Skill: Inter-Agent Collaboration (collab)
 
-Enable multiple AI agents (Claude, GPT, Gemini, or any CLI agent) in a tmux session to collaborate on tasks through a structured protocol. Agents discover each other via a registry, exchange messages through a shared channel file, and use tmux only for wakeup notifications.
+Enable multiple AI agents (Claude, GPT, Gemini, or any CLI agent) in a tmux session to collaborate through a structured protocol. Agents exchange messages via a shared channel file and use tmux for wakeup notifications.
 
 This skill is model-agnostic. Any agent that can read files, write files, and run bash commands can participate.
 
@@ -14,10 +14,7 @@ This skill is model-agnostic. Any agent that can read files, write files, and ru
 
 ```
 .collab/                         ← project-local runtime state (gitignored)
-├── agents.json                  ← live registry (runtime bindings)
-├── identities/                  ← stable agent identities (persist across restarts)
-│   ├── opus.json
-│   └── codex.json
+├── agents.json                  ← agent registry (user-triggered writes only)
 ├── channel.md                   ← ONE active topic
 └── archive/                     ← completed topics
     ├── 001_topic_name.md
@@ -27,132 +24,106 @@ This skill is model-agnostic. Any agent that can read files, write files, and ru
 **Transport model:**
 - **Files** carry all content (durable, inspectable)
 - **Tmux** is only used to wake agents ("go read the channel")
-- **No hardcoded pane addresses** — agents look each other up in the registry
+- **Registry** is a lightweight address book — written on registration, read-only during normal operation
 
-## Identity model
+## Agent registry
 
-Agent identity has two layers:
+### agents.json
 
-### 1. Persistent identity (survives everything)
-
-Stored in `.collab/identities/<agent_id>.json`. Created once, never deleted.
-
-```json
-{
-  "agent_id": "codex",
-  "role": "reviewer",
-  "model": "gpt-5.4",
-  "token": "stable-uuid-generated-on-first-registration",
-  "created": "2026-03-16T20:00:00Z"
-}
-```
-
-Survives: pane rearrangements, session close/restore, agent restarts.
-
-### 2. Runtime binding (ephemeral, re-registered on every startup)
-
-Stored in `.collab/agents.json`. Updated on every activation.
+A simple address book. Agents write to it only when explicitly registering. During normal collaboration, agents only read it to look up target pane_ids.
 
 ```json
 {
   "agents": [
     {
-      "agent_id": "codex",
-      "token": "stable-uuid",
-      "pane_id": "%34",
-      "pane_address": "myproject:0.1",
-      "instance_id": "2026-03-16T21:14:02Z#8f3d",
-      "status": "active",
-      "last_seen": "2026-03-16T21:16:00Z"
+      "name": "Archie",
+      "pane_id": "%18",
+      "role": "architect",
+      "model": "claude-opus-4",
+      "description": "Lead architect for Umple LSP. Designs features, writes production code, thinks long-term."
+    },
+    {
+      "name": "Rex",
+      "pane_id": "%45",
+      "role": "reviewer",
+      "model": "gpt-5.4",
+      "description": "Code reviewer. Focuses on correctness, edge cases, and design critique."
     }
-  ],
-  "channel": ".collab/channel.md",
-  "created": "2026-03-16T20:00:00Z"
+  ]
 }
 ```
 
-- `pane_id` (`%34`): primary delivery target — stable across layout changes
-- `pane_address` (`myproject:0.1`): human-readable, for debugging only
-- `instance_id`: unique per startup — lets others detect restarts
+### Agent name
 
-### Why two layers?
+Each agent has a unique name used for addressing. The name can be:
+- **User-provided:** "Register yourself as Archie"
+- **Auto-generated:** If no name given, use `<role>-<4 random hex chars>`, e.g., `opus-a3f2`
 
-| Scenario | Identity | Runtime binding |
-|----------|----------|-----------------|
-| Pane rearranged (Prefix+Space) | Unchanged | `pane_id` unchanged (stable) |
-| Session closed + restored | Unchanged (file on disk) | New `pane_id`, new `instance_id` |
-| Agent restarts in same pane | Unchanged | New `instance_id` |
-| Agent deleted | Remove identity file | Remove from registry |
+The name is saved to the agent's own config file (CLAUDE.md, CODEX.md, etc.) and memory so it remembers its name across sessions.
 
-## Bootstrapping — how agents join
+### Description
 
-### First agent: triggered by the user
+Derived from the agent's config/memory files, not invented fresh each time. No ephemeral state, no pane details. It should be able to summarize the role, capability, and other characterstics of the agent accurately.
 
-The user says something like "collaborate with Codex" or "solve this with the other agent." This triggers the first agent to:
-1. Read this skill file (`~/.agent-skills/collab/SKILL.md`)
-2. Initialize `.collab/` if needed
-3. Register itself
-4. Write to channel
-5. Wake the second agent
+## Registration
 
-**First-contact delivery:** The target agent is not yet in `agents.json` at this point — the registry doesn't exist yet. The first agent must discover the target pane manually:
-- **Ask the user** which tmux pane the target agent is in, OR
-- **Auto-detect** by running `tmux list-panes -a -F '#{pane_id} #{pane_pid} #{pane_current_command}'` and identifying the target by its process (e.g., `node` for Codex, another CLI agent)
-- **Use this one-time pane for the initial wakeup only** — after the target registers, all subsequent delivery uses the registry
+Registration is **user-triggered only**. No auto-detection on every task.
 
-This manual/semi-automatic step is the ONLY time a pane address is used without the registry. After both agents register, registry-based discovery takes over.
+### Register (user says "register yourself" or "register as <name>")
 
-### Subsequent agents: triggered by `[COLLAB]` message
+1. Detect own pane_id: `tmux display-message -p '#{pane_id}'`
+2. Determine name:
+   - If user provided a name → use it
+   - If agent already has a name in its config/memory → use it
+   - Otherwise → generate `<role>-<4 random hex chars>`
+3. **Check for name conflict:** if the name already exists in `agents.json`:
+   - Ask the user: "An agent named X already exists. Replace it?"
+   - If yes → overwrite
+   - If no → ask user for a different name
+4. Read own config/memory files to generate role and description
+5. Write entry to `.collab/agents.json`
+6. Save name to own config file (CLAUDE.md, CODEX.md, etc.) and memory
 
-When an agent receives a `[COLLAB]` wakeup, the message includes the skill reference:
-```
-[COLLAB] From opus: Review rename proposal. Protocol: ~/.agent-skills/collab/SKILL.md. See .collab/channel.md
-```
+### Replace on restore
 
-The receiving agent:
-1. Reads the skill file — learns the protocol
-2. Registers itself (now the registry has both agents)
-3. Reads the channel — responds using registry-based delivery from now on
+If a session is closed and restored, the agent registers with the same name (read from its config). The old entry is overwritten with the new pane_id. No conflict prompt needed — same name = same agent returning.
 
-**No per-project config needed.** Any agent can be bootstrapped by a single wakeup message. The skill file at `~/.agent-skills/collab/SKILL.md` is the only prerequisite (installed once globally).
+### Update pane (user says "update your pane")
 
-### After session restore
+Agent re-detects pane_id and updates its entry in `agents.json`. Only when user explicitly asks — not automatic.
 
-On restart, the first `[COLLAB]` message or user instruction triggers re-registration. Identity files persist on disk — only runtime binding (pane_id) needs refreshing. First-contact discovery may be needed again if the registry is stale.
+### Remove agent (user says "remove agent X")
 
-## Prerequisites
+Agent deletes the entry with that name from `agents.json`.
 
-- **tmux** — for pane management and wakeup delivery
-- **JSON parsing** — the examples use `jq` for reading `agents.json`. If `jq` is not available, agents can use any equivalent: `python -c "import json; ..."`, `node -e "..."`, or parse the JSON directly with their built-in tools. Most AI coding agents can read and write JSON natively without shell tools.
+### List agents
 
-## Quick start
+**MUST read `.collab/agents.json` from disk every time.** Never rely on memory or cached state — another agent may have registered or been removed since you last checked. Always read the actual file and display its current contents.
 
-### 1. Initialize collaboration
+### Unknown agent
 
-```bash
-mkdir -p .collab/identities .collab/archive
-```
+If a target name is not in `agents.json`, do NOT guess. Ask the user to register that agent or provide its pane_id.
 
-### 2. Register yourself
+## Permissions setup
 
-On activation (first time or after restart):
+This skill uses tmux commands for pane detection (during registration only) and message delivery. To avoid permission prompts, configure your agent's CLI to auto-allow tmux commands:
+
+- **Claude Code:** Add `"Bash(tmux *)"` to `allowedTools` in `.claude/settings.json`
+- **Codex CLI (OpenAI):** Use `--full-auto` flag or equivalent
+- **Gemini CLI:** Configure to allow shell commands without prompting
+- **Other agents:** Allow `tmux send-keys`, `tmux list-panes`, `tmux display-message`, `tmux copy-mode`
+
+## Collaboration workflow
+
+### 1. Initialize
 
 ```bash
-# 1. Get your pane ID (stable across layout changes)
-MY_PANE_ID=$(tmux display-message -p '#{pane_id}')
-MY_PANE_ADDR=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}')
-
-# 2. Load or create identity file
-# If .collab/identities/MY_ID.json exists → load token
-# If not → create with new UUID token
-
-# 3. Update agents.json with current runtime binding
-# Write: agent_id, token, pane_id, pane_address, instance_id, status, last_seen
+mkdir -p .collab/archive
 ```
 
-### 3. Start a topic
+### 2. Start a topic
 
-Clear `channel.md` and write:
+Write to `.collab/channel.md`:
 
 ```markdown
 # Topic: [descriptive name]
@@ -164,51 +135,39 @@ Clear `channel.md` and write:
 Your message here...
 ```
 
-### 4. Send a message
+### 3. Send a message
 
-Look up target by `agent_id`, deliver via `pane_id`:
+Look up target pane_id from `agents.json`, deliver:
 
 ```bash
-PANE=$(jq -r '.agents[] | select(.agent_id=="TARGET_ID") | .pane_id' .collab/agents.json)
-
-# Validate pane still exists
-if tmux list-panes -a -F '#{pane_id}' | grep -q "$PANE"; then
-  # Exit copy/scroll mode if active (prevents keys going to wrong place)
-  tmux copy-mode -t "$PANE" -q 2>/dev/null
-  sleep 0.1
-  # Send wakeup with summary
-  tmux send-keys -t "$PANE" -l "[COLLAB] From YOUR_ID: Short summary. Protocol: ~/.agent-skills/collab/SKILL.md. See .collab/channel.md" && sleep 0.1 && tmux send-keys -t "$PANE" Enter
-else
-  # Pane is stale — mark agent stale, set topic BLOCKED
-fi
+# Exit copy/scroll mode (prevents keys going to wrong place)
+tmux copy-mode -t TARGET_PANE -q 2>/dev/null
+sleep 0.1
+# Send wakeup with summary
+tmux send-keys -t TARGET_PANE -l "[COLLAB] From YOUR_ID: Short summary. See .collab/channel.md" && sleep 0.1 && tmux send-keys -t TARGET_PANE Enter
 ```
-
-**Important: always exit copy mode first.** If a tmux pane is in scroll/copy mode (Prefix+[), `send-keys` goes to copy-mode commands instead of terminal input. `tmux copy-mode -t PANE -q` exits copy mode safely (no-op if not in copy mode).
 
 **Wakeup rules:**
 - Always include `[COLLAB]` prefix
 - Include sender name and 1-line action summary (≤120 chars)
-- Include `Protocol: ~/.agent-skills/collab/SKILL.md` for unregistered agents
-- Reference `.collab/channel.md` for full content
-- Never send bare "read the file" messages
+- For unregistered agents, include `Protocol: ~/.agent-skills/collab/SKILL.md`
 - Always exit copy mode before sending
 
-### 5. Respond to a wakeup
+### 4. Respond to a wakeup
 
 When you receive a `[COLLAB]` message:
 1. You are now in collaborative mode (auto-activation)
 2. Read `.collab/channel.md`
 3. Append your response (never rewrite prior messages)
-4. Update your `last_seen` and `status` in `agents.json`
-5. Wake the sender back with your summary
+4. Wake the sender back with your summary
 
-### 6. Resolve and archive
+### 5. Resolve and archive
 
 When both agents agree:
 1. Set `## Status: RESOLVED` in `channel.md`
 2. **The agent who writes RESOLVED owns the cleanup:**
    - Move content to `.collab/archive/NNN_topic_name.md`
-   - Reset `channel.md` to empty
+   - Reset `channel.md` to idle
 3. Notify other agents that collaborative mode is deactivated
 
 ## Protocol rules
@@ -227,27 +186,13 @@ When both agents agree:
 - `BLOCKED` — waiting on user input, permissions, or external action
 - `RESOLVED` — both agents agree, ready to archive
 
-### Agent statuses
-
-- `active` — running and responsive
-- `idle` — running but not in collaborative mode
-- `stale` — pane no longer exists (detected by validation)
-
 ### Delivery rules
 
-- **Deliver by `pane_id`** (`%XX`), never by pane index
-- **Validate before sending** — check `tmux list-panes -a -F '#{pane_id}'`
-- **If stale:** mark agent `stale`, set topic `BLOCKED`, leave message in channel
-- **Receiver must acknowledge** — append ack in channel + update `last_seen`
-- **Never retry blindly** — if delivery fails, mark and wait
-
-### Pane ID notes
-
-- `pane_id` (`%34`) is stable across tmux layout changes (Prefix+Space)
-- `pane_id` is NOT stable across tmux server restart / session restore
-- On restart, agents re-register with their new `pane_id` — identity file persists
-- `pane_id` is a transport locator, NOT an identity anchor
-- For MVP, assume one tmux server; note this limitation for multi-server setups
+- **Deliver by `pane_id`** (`%XX`) — stable across tmux layout changes
+- **Exit copy mode first** — `tmux copy-mode -t PANE -q 2>/dev/null` before every send
+- **Use `-l` flag** — `tmux send-keys -t PANE -l "text"` for literal mode
+- **Delayed Enter** — `&& sleep 0.1 && tmux send-keys -t PANE Enter`
+- **If delivery fails** — ask the user for the correct pane, don't guess
 
 ### Collaborative mode lifecycle
 
@@ -266,8 +211,17 @@ When both agents agree:
 
 ## Multi-agent support
 
-- Each agent registers in `agents.json` with a unique `agent_id`
+- Each agent registers in `agents.json` with a unique `name`
 - Messages addressed by `[To: agent-id]` or `[To: *]` for broadcast
 - Wakeup sent only to addressed agent(s)
-- Registry lookup by `agent_id` or `role`
-- For multiple agents of the same role, use explicit IDs (`claude-1`, `claude-2`)
+- User says "list agents" → agent reads and displays `agents.json`
+
+## Project config
+
+Each agent's project config file should include one line:
+
+```markdown
+For multi-agent collaboration, follow ~/.agent-skills/collab/SKILL.md. Your name is "<name>".
+```
+
+This is the only per-project setup needed. The name is saved after first registration.
