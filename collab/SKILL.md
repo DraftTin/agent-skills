@@ -95,6 +95,13 @@ The user says something like "collaborate with Codex" or "solve this with the ot
 4. Write to channel
 5. Wake the second agent
 
+**First-contact delivery:** The target agent is not yet in `agents.json` at this point — the registry doesn't exist yet. The first agent must discover the target pane manually:
+- **Ask the user** which tmux pane the target agent is in, OR
+- **Auto-detect** by running `tmux list-panes -a -F '#{pane_id} #{pane_pid} #{pane_current_command}'` and identifying the target by its process (e.g., `node` for Codex, another CLI agent)
+- **Use this one-time pane for the initial wakeup only** — after the target registers, all subsequent delivery uses the registry
+
+This manual/semi-automatic step is the ONLY time a pane address is used without the registry. After both agents register, registry-based discovery takes over.
+
 ### Subsequent agents: triggered by `[COLLAB]` message
 
 When an agent receives a `[COLLAB]` wakeup, the message includes the skill reference:
@@ -104,14 +111,19 @@ When an agent receives a `[COLLAB]` wakeup, the message includes the skill refer
 
 The receiving agent:
 1. Reads the skill file — learns the protocol
-2. Registers itself
-3. Reads the channel — responds
+2. Registers itself (now the registry has both agents)
+3. Reads the channel — responds using registry-based delivery from now on
 
 **No per-project config needed.** Any agent can be bootstrapped by a single wakeup message. The skill file at `~/.agent-skills/collab/SKILL.md` is the only prerequisite (installed once globally).
 
 ### After session restore
 
-On restart, the first `[COLLAB]` message or user instruction triggers re-registration. Identity files persist on disk — only runtime binding (pane_id) needs refreshing.
+On restart, the first `[COLLAB]` message or user instruction triggers re-registration. Identity files persist on disk — only runtime binding (pane_id) needs refreshing. First-contact discovery may be needed again if the registry is stale.
+
+## Prerequisites
+
+- **tmux** — for pane management and wakeup delivery
+- **JSON parsing** — the examples use `jq` for reading `agents.json`. If `jq` is not available, agents can use any equivalent: `python -c "import json; ..."`, `node -e "..."`, or parse the JSON directly with their built-in tools. Most AI coding agents can read and write JSON natively without shell tools.
 
 ## Quick start
 
