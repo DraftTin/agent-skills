@@ -84,6 +84,35 @@ Stored in `.collab/agents.json`. Updated on every activation.
 | Agent restarts in same pane | Unchanged | New `instance_id` |
 | Agent deleted | Remove identity file | Remove from registry |
 
+## Bootstrapping — how agents join
+
+### First agent: triggered by the user
+
+The user says something like "collaborate with Codex" or "solve this with the other agent." This triggers the first agent to:
+1. Read this skill file (`~/.agent-skills/collab/SKILL.md`)
+2. Initialize `.collab/` if needed
+3. Register itself
+4. Write to channel
+5. Wake the second agent
+
+### Subsequent agents: triggered by `[COLLAB]` message
+
+When an agent receives a `[COLLAB]` wakeup, the message includes the skill reference:
+```
+[COLLAB] From opus: Review rename proposal. Protocol: ~/.agent-skills/collab/SKILL.md. See .collab/channel.md
+```
+
+The receiving agent:
+1. Reads the skill file — learns the protocol
+2. Registers itself
+3. Reads the channel — responds
+
+**No per-project config needed.** Any agent can be bootstrapped by a single wakeup message. The skill file at `~/.agent-skills/collab/SKILL.md` is the only prerequisite (installed once globally).
+
+### After session restore
+
+On restart, the first `[COLLAB]` message or user instruction triggers re-registration. Identity files persist on disk — only runtime binding (pane_id) needs refreshing.
+
 ## Quick start
 
 ### 1. Initialize collaboration
@@ -94,7 +123,7 @@ mkdir -p .collab/identities .collab/archive
 
 ### 2. Register yourself
 
-On every activation:
+On activation (first time or after restart):
 
 ```bash
 # 1. Get your pane ID (stable across layout changes)
@@ -106,6 +135,7 @@ MY_PANE_ADDR=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_i
 # If not → create with new UUID token
 
 # 3. Update agents.json with current runtime binding
+# Write: agent_id, token, pane_id, pane_address, instance_id, status, last_seen
 ```
 
 ### 3. Start a topic
@@ -131,17 +161,25 @@ PANE=$(jq -r '.agents[] | select(.agent_id=="TARGET_ID") | .pane_id' .collab/age
 
 # Validate pane still exists
 if tmux list-panes -a -F '#{pane_id}' | grep -q "$PANE"; then
-  tmux send-keys -t "$PANE" -l "[COLLAB] From YOUR_ID: Short action summary. See .collab/channel.md" && sleep 0.1 && tmux send-keys -t "$PANE" Enter
+  # Exit copy/scroll mode if active (prevents keys going to wrong place)
+  tmux copy-mode -t "$PANE" -q 2>/dev/null
+  sleep 0.1
+  # Send wakeup with summary
+  tmux send-keys -t "$PANE" -l "[COLLAB] From YOUR_ID: Short summary. Protocol: ~/.agent-skills/collab/SKILL.md. See .collab/channel.md" && sleep 0.1 && tmux send-keys -t "$PANE" Enter
 else
   # Pane is stale — mark agent stale, set topic BLOCKED
 fi
 ```
 
+**Important: always exit copy mode first.** If a tmux pane is in scroll/copy mode (Prefix+[), `send-keys` goes to copy-mode commands instead of terminal input. `tmux copy-mode -t PANE -q` exits copy mode safely (no-op if not in copy mode).
+
 **Wakeup rules:**
 - Always include `[COLLAB]` prefix
 - Include sender name and 1-line action summary (≤120 chars)
+- Include `Protocol: ~/.agent-skills/collab/SKILL.md` for unregistered agents
 - Reference `.collab/channel.md` for full content
 - Never send bare "read the file" messages
+- Always exit copy mode before sending
 
 ### 5. Respond to a wakeup
 
