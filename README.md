@@ -11,7 +11,7 @@ A collection of reusable skills for AI coding agents. Model-agnostic — works w
 ## Installation
 
 ```bash
-git clone https://github.com/yourname/agent-skills ~/.agent-skills
+git clone https://github.com/DraftTin/agent-skills ~/.agent-skills
 ```
 
 Then reference skills from your project's agent config:
