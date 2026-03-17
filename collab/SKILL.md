@@ -1,6 +1,8 @@
 # Skill: Inter-Agent Collaboration (collab)
 
-Enable multiple AI agents in a tmux session to collaborate on tasks through a structured protocol. Agents discover each other via a registry, exchange messages through a shared channel file, and use tmux only for wakeup notifications.
+Enable multiple AI agents (Claude, GPT, Gemini, or any CLI agent) in a tmux session to collaborate on tasks through a structured protocol. Agents discover each other via a registry, exchange messages through a shared channel file, and use tmux only for wakeup notifications.
+
+This skill is model-agnostic. Any agent that can read files, write files, and run bash commands can participate.
 
 ## When to use
 
